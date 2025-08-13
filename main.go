@@ -9,11 +9,11 @@ import (
 )
 
 func main() {
-	const port = 8000
+	const port = 9000
 	// Start TCP server in background
 	go netconn.StartTCPServer(port)
 	// Announce service
-	go discovery.Announce("node2", "123", port)
+	go discovery.Announce("node1", "123", port)
 
 	time.Sleep(2 * time.Second) // wait a bit before browsing
 	// Find peers

@@ -1,10 +1,26 @@
 package netconn
 
 import (
+	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
+const passcode = "hello123"
+
+func generateNonce(length int) (string, error) {
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
 func ConnectTCP(ip string, port int) error {
 	addr := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.Dial("tcp", addr)
@@ -13,13 +29,22 @@ func ConnectTCP(ip string, port int) error {
 	}
 	defer conn.Close()
 
-	message := "Hello from client!\n"
-	_, err = conn.Write([]byte(message))
-	if err != nil {
-		return err
-	}
+	nonce, _ := bufio.NewReader(conn).ReadString('\n')
+	nonce = strings.TrimSpace(nonce)
+	fmt.Println("Received nonce:", nonce)
 
-	fmt.Printf("Sent message to %s\n", addr)
+	// Step 2: Prompt user for passcode
+	fmt.Print("Enter passcode: ")
+	inputPass, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	inputPass = strings.TrimSpace(inputPass)
+
+	// Step 3: Hash(passcode + nonce) using bcrypt
+	hash, _ := bcrypt.GenerateFromPassword([]byte(inputPass+nonce), bcrypt.DefaultCost)
+	conn.Write([]byte(string(hash) + "\n"))
+
+	// Step 4: Get result
+	result, _ := bufio.NewReader(conn).ReadString('\n')
+	fmt.Println("Server says:", strings.TrimSpace(result))
 	return nil
 }
 
@@ -44,7 +69,19 @@ func StartTCPServer(port int) {
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
-	buf := make([]byte, 1024)
-	n, _ := conn.Read(buf)
-	fmt.Printf("Received: %s", string(buf[:n]))
+	nonce, _ := generateNonce(15)
+	conn.Write([]byte(nonce + "\n"))
+
+	// Step 2: Receive bcrypt hash from client
+	clientHash, _ := bufio.NewReader(conn).ReadString('\n')
+	clientHash = strings.TrimSpace(clientHash)
+	// Step 4: Compare hashes
+	err := bcrypt.CompareHashAndPassword([]byte(clientHash), []byte(passcode+nonce))
+	if err == nil {
+		conn.Write([]byte("SUCCESS\n"))
+		fmt.Println("Authentication successful for a peer")
+	} else {
+		conn.Write([]byte("FAIL\n"))
+		fmt.Println("Authentication failed for a peer")
+	}
 }
