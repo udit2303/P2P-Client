@@ -9,7 +9,15 @@ import (
 	"os"
 	"strings"
 
+	"sync"
+
+	"github.com/udit2303/p2p-client/pkg/transfer"
 	"golang.org/x/crypto/bcrypt"
+)
+
+var (
+	connectionLocked bool
+	lock             sync.Mutex
 )
 
 const passcode = "hello123"
@@ -22,6 +30,14 @@ func generateNonce(length int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 func ConnectTCP(ip string, port int) error {
+	lock.Lock()
+	if connectionLocked {
+		lock.Unlock()
+		fmt.Println("Connection is locked. Cannot connect to server.")
+		return fmt.Errorf("connection locked")
+	}
+	lock.Unlock()
+
 	addr := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -45,6 +61,11 @@ func ConnectTCP(ip string, port int) error {
 	// Step 4: Get result
 	result, _ := bufio.NewReader(conn).ReadString('\n')
 	fmt.Println("Server says:", strings.TrimSpace(result))
+	e := transfer.SendFile(conn, "file.txt")
+	if e != nil {
+		// handle error
+		fmt.Println(e)
+	}
 	return nil
 }
 
@@ -58,6 +79,13 @@ func StartTCPServer(port int) {
 	fmt.Printf("TCP server listening on port %d\n", port)
 
 	for {
+		lock.Lock()
+		if connectionLocked {
+			lock.Unlock()
+			fmt.Println("Connection locked. No longer accepting new connections.")
+			break // Stop accepting new connections
+		}
+		lock.Unlock()
 		conn, err := ln.Accept()
 		if err != nil {
 			fmt.Println("Connection error:", err)
@@ -80,6 +108,13 @@ func handleConnection(conn net.Conn) {
 	if err == nil {
 		conn.Write([]byte("SUCCESS\n"))
 		fmt.Println("Authentication successful for a peer")
+		lock.Lock()
+		connectionLocked = true
+		err := transfer.ReceiveFile(conn, "public")
+		if err != nil {
+			fmt.Println(err)
+		}
+		lock.Unlock()
 	} else {
 		conn.Write([]byte("FAIL\n"))
 		fmt.Println("Authentication failed for a peer")
