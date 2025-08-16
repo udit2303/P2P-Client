@@ -34,9 +34,19 @@ func SendFile(conn io.Writer, filePath string) error {
 	}
 	defer file.Close()
 
-	_, err = io.Copy(conn, file)
-	if err != nil {
-		return fmt.Errorf("failed to send file data: %w", err)
+	buf := make([]byte, 4096)
+	for {
+		n, err := file.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Println("Read Error", err)
+		}
+		_, writeErr := conn.Write(buf[:n])
+		if writeErr != nil {
+			fmt.Println("Write Error", writeErr)
+		}
 	}
 
 	return nil

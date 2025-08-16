@@ -29,14 +29,23 @@ func generateNonce(length int) (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
-func ConnectTCP(ip string, port int) error {
+func ConnectTCP(ip string, port int, filePath string) error {
+	// Check if we can establish a new connection
 	lock.Lock()
 	if connectionLocked {
 		lock.Unlock()
 		fmt.Println("Connection is locked. Cannot connect to server.")
 		return fmt.Errorf("connection locked")
 	}
+	connectionLocked = true
 	lock.Unlock()
+
+	// Ensure we unlock when done
+	defer func() {
+		lock.Lock()
+		connectionLocked = false
+		lock.Unlock()
+	}()
 
 	addr := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.Dial("tcp", addr)
@@ -59,12 +68,21 @@ func ConnectTCP(ip string, port int) error {
 	conn.Write([]byte(string(hash) + "\n"))
 
 	// Step 4: Get result
-	result, _ := bufio.NewReader(conn).ReadString('\n')
-	fmt.Println("Server says:", strings.TrimSpace(result))
-	e := transfer.SendFile(conn, "file.txt")
-	if e != nil {
-		// handle error
-		fmt.Println(e)
+	result, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read server response: %w", err)
+	}
+	result = strings.TrimSpace(result)
+	fmt.Println("Server says:", result)
+	if result != "SUCCESS" {
+		return fmt.Errorf("authentication failed: server responded with '%s'", result)
+	}
+	if filePath != "" {
+		e := transfer.SendFile(conn, filePath)
+		if e != nil {
+			// handle error
+			fmt.Println(e)
+		}
 	}
 	return nil
 }
@@ -119,4 +137,7 @@ func handleConnection(conn net.Conn) {
 		conn.Write([]byte("FAIL\n"))
 		fmt.Println("Authentication failed for a peer")
 	}
+	lock.Lock()
+	connectionLocked = false
+	lock.Unlock()
 }
