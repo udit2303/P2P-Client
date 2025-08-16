@@ -1,55 +1,141 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/udit2303/p2p-client/pkg/discovery"
 	"github.com/udit2303/p2p-client/pkg/netconn"
+	"github.com/udit2303/p2p-client/pkg/util"
 )
 
+var (
+	log = util.DefaultLogger()
+)
+
+// GetLocalIP returns the non-loopback local IP of the machine
+func GetLocalIP() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String(), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no non-loopback address found")
+}
+
 func main() {
+	// Set up context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle OS signals for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Info("Received signal, shutting down...", "signal", sig)
+		cancel()
+	}()
+
 	// Define command-line flags
 	port := flag.Int("port", 8000, "Port to listen on")
 	nodeName := flag.String("name", "node1", "Name of this node")
 	filePath := flag.String("file", "", "Path to the file to send")
 	search := flag.String("search", "", "Search for a peer")
+	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
+
+	// Configure logger based on debug flag
+	if *debug {
+		log = util.NewLogger(os.Stdout, util.DebugLevel)
+	}
+
+	// Add node name to all log messages
+	log = log.With("node", *nodeName, "port", *port)
 
 	// Check if file path is provided if this node is a sender
 	if *filePath != "" {
 		if _, err := os.Stat(*filePath); os.IsNotExist(err) {
-			fmt.Printf("Error: File '%s' does not exist\n", *filePath)
+			log.Error("File does not exist", "path", *filePath)
 			os.Exit(1)
 		}
-		fmt.Printf("Will send file: %s\n", *filePath)
+		log.Info("Will send file", "path", *filePath)
 	}
 
-	fmt.Printf("Starting node '%s' on port %d\n", *nodeName, *port)
+	log.Info("Starting P2P node")
 
 	// Start TCP server in background
-	go netconn.StartTCPServer(*port)
-	// Announce service
-	go discovery.Announce(*nodeName, "123", *port)
+	errCh := make(chan error, 1)
+	go func() {
+		if err := netconn.StartTCPServer(*port); err != nil {
+			errCh <- fmt.Errorf("TCP server error: %w", err)
+		}
+	}()
 
-	time.Sleep(2 * time.Second) // wait a bit before browsing
-	// Find peers
+	// Announce service
+	go func() {
+		if err := discovery.Announce(*nodeName, "123", *port); err != nil {
+			errCh <- fmt.Errorf("service announcement error: %w", err)
+		}
+	}()
+
+	// Wait a bit for services to start
+	select {
+	case <-time.After(3 * time.Second):
+		log.Debug("Services started successfully")
+	case err := <-errCh:
+		log.Error("Failed to start services", "error", err)
+		os.Exit(1)
+	}
+
+	// Find peers if search flag is provided
 	if *search != "" {
-		peers := discovery.FindPeers(*search, 5*time.Second)
+		log.Info("Searching for peers", "service", *search)
+		peers, err := discovery.FindPeers(*search, 5*time.Second)
+		if err != nil {
+			log.Error("Error finding peers", "error", err)
+		} else {
+			log.Info("Discovered peers", "count", len(peers), "peers", peers)
+		}
+
 		for _, peer := range peers {
-			if peer.Port != *port { // avoid connecting to self
-				fmt.Printf("Found peer: %s:%d\n", peer.IP, peer.Port)
-				err := netconn.ConnectTCP(peer.IP, peer.Port, *filePath)
-				if err != nil {
-					fmt.Println("Connection failed:", err)
-				}
+			// Skip if this is our own node
+			if peer.ID == *nodeName {
+				log.Debug("Skipping self", "peer", peer.ID)
+				continue
+			}
+
+			log.Info("Attempting to connect to peer", "peer", peer.ID, "address", fmt.Sprintf("%s:%d", peer.IP, peer.Port))
+			
+			// Use retry with backoff for connection attempts
+			err := util.RetryWithBackoff(ctx, 3, time.Second, func() error {
+				return netconn.ConnectTCP(peer.IP, peer.Port, *filePath)
+			})
+
+			if err != nil {
+				log.Error("Failed to connect to peer", 
+					"peer", peer.ID, 
+					"address", fmt.Sprintf("%s:%d", peer.IP, peer.Port),
+					"error", err)
 			} else {
-				fmt.Println("This node:", peer.IP, ":", peer.Port)
+				log.Info("Successfully connected to peer", "peer", peer.ID)
 			}
 		}
 	}
 
-	select {} // keep main alive
+	// Wait for context cancellation (from signal or error)
+	<-ctx.Done()
+	log.Info("Shutting down...")
 }
