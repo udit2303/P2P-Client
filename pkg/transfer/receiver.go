@@ -3,11 +3,16 @@ package transfer
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/udit2303/p2p-client/pkg/keys"
 	"github.com/udit2303/p2p-client/pkg/util"
 )
 
@@ -24,10 +29,29 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 		return fmt.Errorf("failed to parse manifest: %w", err)
 	}
 
-	// Read the file key (32 bytes for AES-256)
-	fileKey := make([]byte, 32)
-	if _, err := io.ReadFull(conn, fileKey); err != nil {
-		return fmt.Errorf("failed to read file key: %w", err)
+	// Read sender public key (not strictly necessary for decryption, but useful for identification)
+	senderPubBytes, err := util.ReadWithLength(conn)
+	if err != nil {
+		return fmt.Errorf("failed to read sender public key: %w", err)
+	}
+	// Optionally parse sender public key
+	_, err = x509.ParsePKCS1PublicKey(senderPubBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse sender public key")
+	}
+
+	// Read encrypted session key and decrypt using our private key
+	encryptedKey, err := util.ReadWithLength(conn)
+	if err != nil {
+		return fmt.Errorf("failed to read encrypted file key: %w", err)
+	}
+	priv, err := keys.LoadPrivateKey()
+	if err != nil {
+		return fmt.Errorf("failed to load private key: %w", err)
+	}
+	fileKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, encryptedKey, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt file key: %w", err)
 	}
 	// Initialize decryption
 	block, err := aes.NewCipher(fileKey)
@@ -39,10 +63,13 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 		return fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	// Read the nonce
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(conn, nonce); err != nil {
+	// Read base nonce (sent with length framing)
+	nonce, err := util.ReadWithLength(conn)
+	if err != nil {
 		return fmt.Errorf("failed to read nonce: %w", err)
+	}
+	if len(nonce) != gcm.NonceSize() {
+		return fmt.Errorf("invalid nonce size: expected %d, got %d", gcm.NonceSize(), len(nonce))
 	}
 
 	// Create output file
@@ -56,6 +83,7 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 	// Buffer for chunks
 	buffer := make([]byte, 64*1024) // Max possible chunk size
 
+	var counter uint32 = 0
 	for {
 		// Read chunk length
 		var chunkLen uint32
@@ -73,8 +101,13 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 			return fmt.Errorf("failed to read chunk: %w", err)
 		}
 
+		// Derive per-chunk nonce matching sender's scheme
+		chunkNonce := make([]byte, len(nonce))
+		copy(chunkNonce, nonce)
+		binary.BigEndian.PutUint32(chunkNonce[len(chunkNonce)-4:], counter)
+
 		// Decrypt the chunk
-		plaintext, err := gcm.Open(nil, nonce, buffer[:chunkLen], nil)
+		plaintext, err := gcm.Open(nil, chunkNonce, buffer[:chunkLen], nil)
 		if err != nil {
 			return fmt.Errorf("decryption failed: %w", err)
 		}
@@ -83,6 +116,9 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 		if _, err := file.Write(plaintext); err != nil {
 			return fmt.Errorf("failed to write to file: %w", err)
 		}
+
+		// Increment counter to match sender's per-chunk nonce
+		counter++
 	}
 	fmt.Println("File received successfully:", manifest.FileName)
 	return nil

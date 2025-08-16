@@ -4,6 +4,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -33,7 +36,9 @@ func encryptFile(filePath string, key []byte) ([]byte, error) {
 }
 
 // SendFile sends a file with its manifest over the given connection
-func SendFile(conn io.Writer, filePath string) error {
+// SendFile sends a file with its manifest over the given connection.
+// receiverPubKey must be the receiver's RSA public key used to encrypt the session key.
+func SendFile(conn io.Writer, filePath string, receiverPubKey *rsa.PublicKey) error {
 	// Create manifest
 	manifest, err := CreateManifest(filePath)
 	if err != nil {
@@ -56,9 +61,23 @@ func SendFile(conn io.Writer, filePath string) error {
 		return fmt.Errorf("failed to send manifest: %w", err)
 	}
 
-	// Send file key
-	if _, err := conn.Write(fileKey); err != nil {
-		return fmt.Errorf("failed to send file key: %w", err)
+	// Load sender public key and send it so receiver can identify sender
+	senderPub, err := keys.LoadPublicKey()
+	if err != nil {
+		return fmt.Errorf("failed to load sender public key: %w", err)
+	}
+	senderPubBytes := x509.MarshalPKCS1PublicKey(senderPub)
+	if err := util.SendWithLength(conn, senderPubBytes); err != nil {
+		return fmt.Errorf("failed to send sender public key: %w", err)
+	}
+
+	// Encrypt the session (file) key with receiver's public key and send it
+	encryptedKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, receiverPubKey, fileKey, nil)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt file key: %w", err)
+	}
+	if err := util.SendWithLength(conn, encryptedKey); err != nil {
+		return fmt.Errorf("failed to send encrypted file key: %w", err)
 	}
 
 	// Open the file
@@ -82,8 +101,8 @@ func SendFile(conn io.Writer, filePath string) error {
 		return fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	// Send nonce first
-	if _, err := conn.Write(nonce); err != nil {
+	// Send base nonce (will derive per-chunk nonces by incrementing counter)
+	if err := util.SendWithLength(conn, nonce); err != nil {
 		return fmt.Errorf("failed to send nonce: %w", err)
 	}
 
@@ -91,6 +110,7 @@ func SendFile(conn io.Writer, filePath string) error {
 	chunkSize := 64*1024 - 28 // 64KB - 28 bytes for GCM overhead
 	buffer := make([]byte, chunkSize)
 
+	var counter uint32 = 0
 	for {
 		// Read chunk
 		n, err := file.Read(buffer)
@@ -101,8 +121,14 @@ func SendFile(conn io.Writer, filePath string) error {
 			return fmt.Errorf("read error: %w", err)
 		}
 
-		// Encrypt chunk
-		ciphertext := gcm.Seal(nil, nonce, buffer[:n], nil)
+		// Derive per-chunk nonce: copy base nonce and put counter in last 4 bytes
+		chunkNonce := make([]byte, len(nonce))
+		copy(chunkNonce, nonce)
+		// Place counter in last 4 bytes (works when nonce size >= 4)
+		binary.BigEndian.PutUint32(chunkNonce[len(chunkNonce)-4:], counter)
+
+		// Encrypt chunk with per-chunk nonce
+		ciphertext := gcm.Seal(nil, chunkNonce, buffer[:n], nil)
 
 		// Send chunk length
 		if err := binary.Write(conn, binary.BigEndian, uint32(len(ciphertext))); err != nil {
@@ -113,6 +139,9 @@ func SendFile(conn io.Writer, filePath string) error {
 		if _, err := conn.Write(ciphertext); err != nil {
 			return fmt.Errorf("failed to send chunk: %w", err)
 		}
+
+		// Increment counter for next chunk
+		counter++
 	}
 
 	// Send a zero-length chunk to signal end of file

@@ -3,6 +3,7 @@ package netconn
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/udit2303/p2p-client/pkg/keys"
 	"github.com/udit2303/p2p-client/pkg/transfer"
 	"github.com/udit2303/p2p-client/pkg/util"
 	"golang.org/x/crypto/bcrypt"
@@ -111,9 +113,21 @@ func ConnectTCP(ip string, port int, filePath string) error {
 	}
 
 	log.Info("Authentication successful")
+	// After successful auth, read server public key (sent by the server)
+	serverPubBytes, err := util.ReadWithLength(conn)
+	if err != nil {
+		log.Error("Failed to read server public key", "error", err)
+		return fmt.Errorf("failed to read server public key: %w", err)
+	}
+	serverPub, err := x509.ParsePKCS1PublicKey(serverPubBytes)
+	if err != nil {
+		log.Error("Failed to parse server public key", "error", err)
+		return fmt.Errorf("failed to parse server public key: %w", err)
+	}
+
 	if filePath != "" {
 		log.Info("Starting file transfer", "file", filePath)
-		err = transfer.SendFile(conn, filePath)
+		err = transfer.SendFile(conn, filePath, serverPub)
 		if err != nil {
 			log.Error("File transfer failed", "error", err, "file", filePath)
 			return fmt.Errorf("file transfer failed: %w", err)
@@ -224,6 +238,18 @@ func handleConnection(conn net.Conn) {
 
 	// Handle file transfer
 	log.Info("Starting file transfer")
+	// Send server public key so client can encrypt the session key
+	serverPub, err := keys.LoadPublicKey()
+	if err != nil {
+		log.Error("Failed to load server public key", "error", err)
+		return
+	}
+	serverPubBytes := x509.MarshalPKCS1PublicKey(serverPub)
+	if err := util.SendWithLength(conn, serverPubBytes); err != nil {
+		log.Error("Failed to send server public key", "error", err)
+		return
+	}
+
 	if err := transfer.ReceiveFile(conn, "public"); err != nil {
 		log.Error("File received failed", "error", err)
 	} else {
