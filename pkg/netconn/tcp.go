@@ -35,6 +35,8 @@ func generateNonce(length int) (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
+
+// ConnectTCP connects to a TCP server and optionally sends a file
 func ConnectTCP(ip string, port int, filePath string) error {
 	// Check if we can establish a new connection
 	lock.Lock()

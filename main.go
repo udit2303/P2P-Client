@@ -118,15 +118,15 @@ func main() {
 			}
 
 			log.Info("Attempting to connect to peer", "peer", peer.ID, "address", fmt.Sprintf("%s:%d", peer.IP, peer.Port))
-			
+
 			// Use retry with backoff for connection attempts
 			err := util.RetryWithBackoff(ctx, 3, time.Second, func() error {
 				return netconn.ConnectTCP(peer.IP, peer.Port, *filePath)
 			})
 
 			if err != nil {
-				log.Error("Failed to connect to peer", 
-					"peer", peer.ID, 
+				log.Error("Failed to connect to peer",
+					"peer", peer.ID,
 					"address", fmt.Sprintf("%s:%d", peer.IP, peer.Port),
 					"error", err)
 			} else {

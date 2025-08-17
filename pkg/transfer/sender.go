@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/udit2303/p2p-client/pkg/keys"
 	"github.com/udit2303/p2p-client/pkg/util"
@@ -36,9 +38,15 @@ func encryptFile(filePath string, key []byte) ([]byte, error) {
 }
 
 // SendFile sends a file with its manifest over the given connection
-// SendFile sends a file with its manifest over the given connection.
 // receiverPubKey must be the receiver's RSA public key used to encrypt the session key.
 func SendFile(conn io.Writer, filePath string, receiverPubKey *rsa.PublicKey) error {
+	// Create progress tracker
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+	progress := NewProgress(info.Name(), info.Size())
+	defer fmt.Println() // Ensure we end the progress line
 	// Create manifest
 	manifest, err := CreateManifest(filePath)
 	if err != nil {
@@ -111,6 +119,8 @@ func SendFile(conn io.Writer, filePath string, receiverPubKey *rsa.PublicKey) er
 	buffer := make([]byte, chunkSize)
 
 	var counter uint32 = 0
+	lastUpdate := time.Now()
+	var lastBytes int64 = 0
 	for {
 		// Read chunk
 		n, err := file.Read(buffer)
@@ -140,6 +150,36 @@ func SendFile(conn io.Writer, filePath string, receiverPubKey *rsa.PublicKey) er
 			return fmt.Errorf("failed to send chunk: %w", err)
 		}
 
+		// Update progress
+		progress.Transferred += int64(n)
+		now := time.Now()
+		if now.Sub(lastUpdate) > 100*time.Millisecond {
+			delta := progress.Transferred - lastBytes
+			deltaTime := now.Sub(lastUpdate).Seconds()
+			if deltaTime > 0 {
+				progress.Speed = float64(delta) / deltaTime
+				if progress.Speed > 0 {
+					progress.ETA = float64(progress.FileSize-progress.Transferred) / progress.Speed
+				}
+			}
+			lastUpdate = now
+			lastBytes = progress.Transferred
+			// Format ETA with duration rounding
+			duration := time.Duration(progress.ETA) * time.Second
+			etaStr := "--:--"
+			if progress.ETA > 0 {
+				etaStr = fmt.Sprintf("%02d:%02d", int(duration.Minutes()), int(duration.Seconds())%60)
+			}
+
+			fmt.Printf("\rSending: %s [%s] %.1f%% - %s/s - ETA: %s",
+				progress.FileName,
+				progressBar(progress.Percent(), 20),
+				progress.Percent(),
+				formatBytes(progress.Speed),
+				etaStr,
+			)
+		}
+
 		// Increment counter for next chunk
 		counter++
 	}
@@ -148,6 +188,12 @@ func SendFile(conn io.Writer, filePath string, receiverPubKey *rsa.PublicKey) er
 	if err := binary.Write(conn, binary.BigEndian, uint32(0)); err != nil {
 		return fmt.Errorf("failed to send EOF marker: %w", err)
 	}
+	// Print final progress
+	fmt.Printf("\rSending: %s [%s] 100%% - Complete!%s\n",
+		progress.FileName,
+		progressBar(100, 20),
+		strings.Repeat(" ", 20), // Clear any remaining characters
+	)
 
 	return nil
 }

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/udit2303/p2p-client/pkg/keys"
 	"github.com/udit2303/p2p-client/pkg/util"
@@ -18,6 +20,10 @@ import (
 
 // ReceiveFile receives a file and its manifest from the given connection
 func ReceiveFile(conn io.Reader, outputDir string) error {
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
 	// Read manifest
 	manifestBytes, err := util.ReadWithLength(conn)
 	if err != nil {
@@ -80,6 +86,13 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 	}
 	defer file.Close()
 
+	// Initialize progress tracking
+	var totalReceived int64 = 0
+	lastUpdate := time.Now()
+	var lastBytes int64 = 0
+	var speed float64 = 0
+	var eta float64 = 0
+
 	// Buffer for chunks
 	buffer := make([]byte, 64*1024) // Max possible chunk size
 
@@ -98,7 +111,11 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 
 		// Read the encrypted chunk
 		if _, err := io.ReadFull(conn, buffer[:chunkLen]); err != nil {
-			return fmt.Errorf("failed to read chunk: %w", err)
+			e := os.Remove(outputPath)
+			if e != nil {
+				return fmt.Errorf("deleting file failed: %w", e)
+			}
+			return fmt.Errorf("deleting file, failed to read chunk: %w", err)
 		}
 
 		// Derive per-chunk nonce matching sender's scheme
@@ -117,9 +134,47 @@ func ReceiveFile(conn io.Reader, outputDir string) error {
 			return fmt.Errorf("failed to write to file: %w", err)
 		}
 
+		// Update progress
+		totalReceived += int64(len(plaintext))
+		now := time.Now()
+		if now.Sub(lastUpdate) > 100*time.Millisecond {
+			delta := totalReceived - lastBytes
+			deltaTime := now.Sub(lastUpdate).Seconds()
+			if deltaTime > 0 {
+				speed = float64(delta) / deltaTime
+				if speed > 0 {
+					eta = float64(manifest.FileSize-totalReceived) / speed
+				}
+			}
+			lastUpdate = now
+			lastBytes = totalReceived
+			percent := float64(totalReceived) / float64(manifest.FileSize) * 100
+
+			// Format ETA with duration rounding
+			etaDuration := time.Duration(eta) * time.Second
+			etaStr := "--:--"
+			if eta > 0 {
+				etaStr = fmt.Sprintf("%02d:%02d", int(etaDuration.Minutes()), int(etaDuration.Seconds())%60)
+			}
+
+			fmt.Printf("\rReceiving: %s [%s] %.1f%% - %s/s - ETA: %s",
+				manifest.FileName,
+				progressBar(percent, 20),
+				percent,
+				formatBytes(speed),
+				etaStr,
+			)
+		}
+
 		// Increment counter to match sender's per-chunk nonce
 		counter++
 	}
+	// Print final progress
+	fmt.Printf("\rReceiving: %s [%s] 100%% - Complete!%s\n",
+		manifest.FileName,
+		progressBar(100, 20),
+		strings.Repeat(" ", 20), // Clear any remaining characters
+	)
 	fmt.Println("File received successfully:", manifest.FileName)
 	return nil
 }
