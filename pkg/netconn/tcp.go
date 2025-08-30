@@ -148,6 +148,10 @@ func StartTCPServer(port int) error {
 	defer ln.Close()
 
 	log.Info("TCP server started", "address", addr)
+	// Best-effort: list local IPs for user visibility
+	if ips, err := util.GetLocalIPs(); err == nil {
+		log.Info("Listening on local interfaces", "ips", ips, "port", port)
+	}
 
 	for {
 		lock.Lock()

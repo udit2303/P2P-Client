@@ -54,6 +54,7 @@ func main() {
 	nodeName := flag.String("name", "node1", "Name of this node")
 	filePath := flag.String("file", "", "Path to the file to send")
 	search := flag.String("search", "", "Search for a peer")
+	connect := flag.String("connect", "", "Directly connect to peer at ip:port (over internet)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
@@ -75,6 +76,18 @@ func main() {
 	}
 
 	log.Info("Starting P2P node")
+
+	// Show local and public IPs to the user
+	if localIPs, err := util.GetLocalIPs(); err == nil {
+		log.Info("Local IPv4 addresses", "ips", localIPs)
+	} else {
+		log.Warn("Unable to get local IPs", "error", err)
+	}
+	if pubIP, pubPort, err := util.GetPublicIP(3 * time.Second); err == nil {
+		log.Info("Public internet address (via STUN)", "ip", pubIP, "port", pubPort)
+	} else {
+		log.Warn("Unable to determine public IP (STUN)", "error", err)
+	}
 
 	// Start TCP server in background
 	errCh := make(chan error, 1)
@@ -98,6 +111,25 @@ func main() {
 	case err := <-errCh:
 		log.Error("Failed to start services", "error", err)
 		os.Exit(1)
+	}
+
+	// Direct connection if connect flag is provided (ip:port)
+	if *connect != "" {
+		host, cport, err := net.SplitHostPort(*connect)
+		if err != nil {
+			log.Error("Invalid -connect address, expected ip:port", "value", *connect, "error", err)
+		} else {
+			// Parse port
+			var p int
+			if _, err := fmt.Sscanf(cport, "%d", &p); err != nil {
+				log.Error("Invalid port in -connect", "port", cport, "error", err)
+			} else {
+				log.Info("Connecting to peer (direct)", "address", *connect)
+				if err := netconn.ConnectTCP(host, p, *filePath); err != nil {
+					log.Error("Direct connect failed", "address", *connect, "error", err)
+				}
+			}
+		}
 	}
 
 	// Find peers if search flag is provided
