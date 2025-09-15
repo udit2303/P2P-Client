@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	PrivateKeyPath = "private2.pem"
-	PublicKeyPath  = "public2.pem"
-	KeySize        = 2048
+	PrivateKeyPath = "private.pem"
+	PublicKeyPath  = "public.pem"
+	KeySize        = 4096
 )
 
 // GenerateRSAKeyPair generates a new RSA key pair and saves them to disk

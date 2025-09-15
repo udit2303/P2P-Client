@@ -55,7 +55,6 @@ func StartWebRTCSender(filePath string) error {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
-			{URLs: []string{"stun:stun1.l.google.com:19302"}},
 		},
 	}
 	pc, err := api.NewPeerConnection(config)
@@ -128,6 +127,13 @@ func StartWebRTCSender(filePath string) error {
 		return fmt.Errorf("set remote failed: %w", err)
 	}
 
+	// Add a local ICE candidate manually
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			fmt.Printf("ICE Candidate: %s\n", candidate.ToJSON().Candidate)
+		}
+	})
+
 	// Wait for completion
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -150,6 +156,8 @@ func StartWebRTCReceiver(outputDir string) error {
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
 			{URLs: []string{"stun:stun1.l.google.com:19302"}},
+			{URLs: []string{"stun:stun.stunprotocol.org:3478"}},
+			{URLs: []string{"stun:stun.cloudflare.com:3478"}},
 		},
 	}
 	pc, err := api.NewPeerConnection(config)

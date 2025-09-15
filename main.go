@@ -55,6 +55,9 @@ func main() {
 	filePath := flag.String("file", "", "Path to the file to send")
 	search := flag.String("search", "", "Search for a peer")
 	connect := flag.String("connect", "", "Directly connect to peer at ip:port (over internet)")
+	outDir := flag.String("out", "public", "Output directory for received files")
+	webrtcSend := flag.Bool("webrtc-send", false, "Use WebRTC to send a file (manual signaling)")
+	webrtcRecv := flag.Bool("webrtc-recv", false, "Use WebRTC to receive a file (manual signaling)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
@@ -87,6 +90,26 @@ func main() {
 		log.Info("Public internet address (via STUN)", "ip", pubIP, "port", pubPort)
 	} else {
 		log.Warn("Unable to determine public IP (STUN)", "error", err)
+	}
+
+	// If using WebRTC modes, run them and exit.
+	if *webrtcRecv {
+		if err := netconn.StartWebRTCReceiver(*outDir); err != nil {
+			log.Error("WebRTC receive failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *webrtcSend {
+		if *filePath == "" {
+			log.Error("-webrtc-send requires -file to be provided")
+			os.Exit(1)
+		}
+		if err := netconn.StartWebRTCSender(*filePath); err != nil {
+			log.Error("WebRTC send failed", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Start TCP server in background
